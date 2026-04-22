@@ -532,13 +532,20 @@ async def play_quiz(
 ) -> dict:
     """Autonomously play an entire quiz using a pre-computed answer map.
 
-    For each question, this tool waits until the presenter starts it
-    (Ably `is_live_question` == True and slide_public_key changed from the
-    previous one), looks up the pre-chosen answer from `answer_map` keyed
-    by `slide_public_key`, and submits it immediately. Loops up to
-    `total_questions` times. Runs entirely inside one MCP call so there is
-    no LLM-turn latency between questions — the only delay is the polling
-    cadence (default 0.3 s) plus the answer-submit round-trip.
+    For each question the tool waits until the presenter *advances to the
+    next quiz slide* (detected when `slide_public_key` changes and the new
+    slide has interactive content), then immediately submits the matching
+    pre-chosen answer from `answer_map`. Looping all questions inside one
+    MCP call removes per-question LLM-turn latency — the only overhead is
+    the Ably poll cadence (default 0.3 s) plus the submit round-trip.
+
+    Triggering on slide-change rather than on the presenter's "Start"
+    button means:
+      • submit fires the instant the teacher moves to the question,
+      • no `started=true` flag is required — Menti's server accepts the
+        response either way (empirically confirmed),
+      • between-question idle periods (teacher talking) do not advance
+        the loop since `slide_public_key` hasn't changed.
 
     Args:
         answer_map: Dict mapping each quiz slide's `slide_public_key` to a
@@ -548,8 +555,8 @@ async def play_quiz(
             `stop_on_missing_answer=True`).
         total_questions: Max number of questions to play. Loop stops early
             if a wait times out (presenter finished / went idle).
-        timeout_per_question_s: How long to wait for each question to go
-            live. Generous default (5 min) accommodates variable teacher
+        timeout_per_question_s: How long to wait for each question to
+            appear. Generous default (5 min) accommodates variable teacher
             pacing.
         poll_interval_s: Ably-REST poll cadence while waiting.
         stop_on_missing_answer: If True, abort the loop when an answer for
@@ -584,9 +591,19 @@ async def play_quiz(
                 consecutive_failures = 0
                 if fetch.state is not None:
                     decorated = _decorate_state(fetch.state, deck)
+                    slide = decorated.get("slide")
+                    slide_key = decorated.get("slide_public_key")
+                    # Trigger the instant the presenter moves to a NEW quiz
+                    # slide (i.e. the slide_public_key changes and the new
+                    # slide carries at least one interactive_content). We do
+                    # NOT require `is_live_question` because the server
+                    # accepts submissions even before the presenter's
+                    # Start-button flips `started` to true.
                     if (
-                        decorated["is_live_question"]
-                        and decorated["slide_public_key"] != last_slide_key
+                        slide_key is not None
+                        and slide_key != last_slide_key
+                        and slide is not None
+                        and slide.get("interactive_contents")
                     ):
                         live = decorated
                         break
