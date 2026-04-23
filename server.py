@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +28,12 @@ BASE = "https://www.menti.com/core"
 ABLY_REST = "https://realtime.ably.menti.com"
 # Public read-only Ably key surfaced by menti.com's own web client.
 ABLY_PUBLIC_KEY = "TTRRVlBRLjlIVVNPQTpFa3lZOWVkcXBqQWNjNzBrVzJ5RVJHUTRCS3FOa3lIb0UxQzJ0OXBnaHdj"
+
+# Random pre-submit delay window (seconds). Applied in `_submit_answer` so every
+# submission path (submit_answer / answer_current_question / play_quiz) looks
+# like a human reacting rather than a bot firing the instant a question goes live.
+SUBMIT_DELAY_MIN_S = 1.5
+SUBMIT_DELAY_MAX_S = 3.0
 
 mcp = FastMCP("menti")
 
@@ -381,6 +388,8 @@ async def _submit_answer(
         }
     }
     headers = {"accept": "application/json", "x-identifier": identifier}
+    delay_s = random.uniform(SUBMIT_DELAY_MIN_S, SUBMIT_DELAY_MAX_S)
+    await asyncio.sleep(delay_s)
     try:
         async with httpx.AsyncClient(base_url=BASE, headers=headers, timeout=10.0) as c:
             r = await c.post(
@@ -396,6 +405,7 @@ async def _submit_answer(
         "question": question["title"],
         "submitted": [{"id": m["id"], "title": m["title"]} for m in resolved],
         "response_body": r.text,
+        "pre_submit_delay_s": round(delay_s, 3),
     }
     if not ok:
         result["error"] = f"http {r.status_code}: {r.text[:200]}"
